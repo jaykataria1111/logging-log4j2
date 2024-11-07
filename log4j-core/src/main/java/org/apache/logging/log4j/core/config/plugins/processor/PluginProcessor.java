@@ -25,9 +25,11 @@ import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -39,14 +41,19 @@ import javax.annotation.processing.SupportedAnnotationTypes;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementVisitor;
+import javax.lang.model.element.ExecutableElement;
+import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
+import javax.lang.model.element.VariableElement;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.SimpleElementVisitor7;
+import javax.lang.model.util.Types;
 import javax.tools.Diagnostic;
 import javax.tools.FileObject;
 import javax.tools.StandardLocation;
 import org.apache.logging.log4j.core.config.plugins.Plugin;
 import org.apache.logging.log4j.core.config.plugins.PluginAliases;
+import org.apache.logging.log4j.core.config.plugins.PluginBuilderAttribute;
 import org.apache.logging.log4j.util.Strings;
 
 /**
@@ -83,6 +90,12 @@ public class PluginProcessor extends AbstractProcessor {
             final Set<? extends Element> elements = roundEnv.getElementsAnnotatedWith(Plugin.class);
             collectPlugins(elements);
             processedElements.addAll(elements);
+
+            // process plugin builder Attributes
+            final Set<? extends Element> pluginAttributeBuilderElements =
+                    roundEnv.getElementsAnnotatedWith(PluginBuilderAttribute.class);
+            processBuilderAttributes(pluginAttributeBuilderElements);
+            processedElements.addAll(pluginAttributeBuilderElements);
         }
         // Write the cache file
         if (roundEnv.processingOver() && !processedElements.isEmpty()) {
@@ -105,6 +118,93 @@ public class PluginProcessor extends AbstractProcessor {
         }
         // Do not claim the annotations to allow other annotation processors to run
         return false;
+    }
+
+    private void processBuilderAttributes(final Iterable<? extends Element> elements) {
+        for (final Element element : elements) {
+            if (element instanceof VariableElement) {
+                processBuilderAttributes((VariableElement) element);
+            }
+        }
+    }
+
+    private void processBuilderAttributes(final VariableElement element) {
+        final String fieldName = element.getSimpleName().toString(); // Getting the name of the field
+        SuppressWarnings suppress = element.getAnnotation(SuppressWarnings.class);
+        if (suppress != null && Arrays.asList(suppress.value()).contains("log4j.public.setter")) {
+            // Suppress the warning due to annotation
+            return;
+        }
+        final Element enclosingElement = element.getEnclosingElement();
+        // `element is a field
+        if (enclosingElement instanceof TypeElement) {
+            final TypeElement typeElement = (TypeElement) enclosingElement;
+            // Check the siblings of the field
+            for (final Element enclosedElement : typeElement.getEnclosedElements()) {
+                // `enclosedElement is a method or constructor
+                if (enclosedElement instanceof ExecutableElement) {
+                    final ExecutableElement methodElement = (ExecutableElement) enclosedElement;
+                    final String methodName = methodElement.getSimpleName().toString();
+
+                    if ((methodName.toLowerCase(Locale.ROOT).startsWith("set") // Typical pattern for setters
+                                    || methodName
+                                            .toLowerCase(Locale.ROOT)
+                                            .startsWith("with")) // Typical pattern for setters
+                            && methodElement.getParameters().size()
+                                    == 1 // It is a weird pattern to not have public setter
+                    ) {
+
+                        Types typeUtils = processingEnv.getTypeUtils();
+
+                        boolean followsNamePattern = methodName
+                                        .toLowerCase(Locale.ROOT)
+                                        .equals(String.format("set%s", fieldName.toLowerCase(Locale.ROOT)))
+                                || methodName
+                                        .toLowerCase(Locale.ROOT)
+                                        .equals(String.format("with%s", fieldName.toLowerCase(Locale.ROOT)));
+
+                        if (fieldName.toLowerCase(Locale.ROOT).startsWith("is")) {
+                            followsNamePattern = methodName
+                                            .toLowerCase(Locale.ROOT)
+                                            .equals(String.format(
+                                                    "set%s",
+                                                    fieldName
+                                                            .toLowerCase(Locale.ROOT)
+                                                            .substring(2)))
+                                    || methodName
+                                            .toLowerCase(Locale.ROOT)
+                                            .equals(String.format(
+                                                    "with%s",
+                                                    fieldName
+                                                            .toLowerCase(Locale.ROOT)
+                                                            .substring(2)));
+                        }
+
+                        // Check if method is public
+                        boolean isPublicMethod = methodElement.getModifiers().contains(Modifier.PUBLIC);
+
+                        // Check if the return type of the method element is Assignable.
+                        // Assuming it is a builder class the type of it should be assignable to its parent
+                        boolean checkForAssignable = typeUtils.isAssignable(
+                                methodElement.getReturnType(),
+                                methodElement.getEnclosingElement().asType());
+
+                        boolean foundPublicSetter = followsNamePattern && checkForAssignable && isPublicMethod;
+                        if (foundPublicSetter) {
+                            // Hurray we found a public setter for the field!
+                            return;
+                        }
+                    }
+                }
+            }
+            // If the setter was not found generate a compiler warning.
+            processingEnv
+                    .getMessager()
+                    .printMessage(
+                            Diagnostic.Kind.WARNING,
+                            String.format("The field `%s` does not have a public setter", fieldName),
+                            element);
+        }
     }
 
     private void collectPlugins(final Iterable<? extends Element> elements) {

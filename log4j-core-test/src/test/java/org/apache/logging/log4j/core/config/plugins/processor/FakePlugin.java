@@ -62,6 +62,10 @@ public class FakePlugin {
         @PluginBuilderAttribute
         private int attribute;
 
+        @PluginBuilderAttribute
+        @SuppressWarnings("log4j.public.setter")
+        private int attributeWithoutPublicSetterButWithSuppressAnnotation;
+
         @PluginElement("layout")
         private Layout<? extends Serializable> layout;
 
